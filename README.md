@@ -135,3 +135,69 @@ PerfDock 只在本机展示指标，没有账号登录、遥测上传、云端�
 ## 开源许可
 
 本项目以 [MIT License](LICENSE) 发布。指标依赖 Apple 平台框架和设备接口；其可用性仍受 macOS 与硬件支持范围限制。
+
+---
+
+## English
+
+### PerfDock — a native macOS desktop performance monitor
+
+PerfDock is a compact native macOS monitor for CPU, GPU, memory, temperature, processes, network traffic, and disk I/O. It keeps frequently checked system metrics near the edge of the desktop and adds live trends and local disk history.
+
+The project started from a familiar problem: a MacBook can feel sluggish while several agents or developer tools are running, yet it is not immediately clear which process or resource deserves attention. PerfDock helps users observe and compare resource usage. It does not diagnose every slowdown automatically, terminate processes, or repair the system.
+
+### Screenshots from real use
+
+The screenshots in this repository were captured from a running app on the developer’s Mac. They contain live system and disk counters from those capture times. Results vary with hardware, workload, and sampling history; the figures are illustrative examples rather than performance benchmarks.
+
+The disk-history capture below shows a high-throughput workload after about 50 hours of local sampling: 990 GB written and 1.63 TB read that day, with 1.70 TB written and 2.97 TB read since tracking began. The seven-day average at capture time was 249 GB written per day. This is one real workload snapshot, not a typical or recommended target.
+
+![Disk reads and writes grouped by day](docs/images/08-disk-day.png)
+
+Disk history is collected only while PerfDock is running. It records observed block-device read/write counter deltas and is not the SSD’s lifetime SMART write total. Gaps while the app is stopped cannot be backfilled.
+
+### Features
+
+- CPU total and per-core usage, GPU utilization, memory and swap statistics, temperature sensors, battery state, network rates, and disk I/O.
+- Process ranking by memory, CPU, or GPU when the relevant system data is available.
+- Live trends for CPU, GPU, memory, and temperature.
+- Disk throughput plus local hourly and daily history, retained for up to 120 days of hourly buckets.
+- Independent switches for nine display modules; network and disk rows start disabled.
+- Edge docking, vertical and horizontal mini modes, a two-column wide layout, window presets, and always-on-top behavior.
+- Dark, light, and system-matched appearance, adjustable background and text opacity, and a global ⌥⇧P visibility shortcut.
+- Optional display behavior tied to WorkBuddy launch and quit events.
+
+### Data sources and interpretation
+
+| Metric | Source | Notes |
+|---|---|---|
+| CPU | Mach host processor statistics | Usage is computed from differences between consecutive counters. Some kernel activity cannot be attributed to visible user processes. |
+| Memory and swap | host_statistics64 and sysctl | System accounting categories may differ from other monitors. |
+| GPU | IOKit IOAccelerator statistics | Device utilization comes from system counters. Per-process attribution is an estimate based on visible clients and cumulative GPU time. |
+| Temperature | AppleSMC | Sensor names do not guarantee a known physical location; a group summary is not necessarily a chassis-surface temperature. |
+| Network | Network-interface byte counters | Shows interface throughput and does not attribute traffic to individual processes. |
+| Disk | IOKit IOBlockStorageDriver counters | Adjacent byte-counter deltas feed throughput and local hourly history. |
+| Processes | macOS libproc and available GPU client data | Protected or kernel processes may be unavailable, so a process list may not account for all device activity. |
+
+Some metrics depend on low-level system interfaces whose availability can vary by Mac model and macOS version. Missing data should remain unavailable rather than be treated as a reliable diagnostic result. GPU attribution is approximate; PerfDock is a monitoring aid, not a service that guarantees the cause of a slowdown.
+
+### Build from source
+
+Requirements: macOS 12 or later, Xcode Command Line Tools, and Swift 5. The build script targets the current machine architecture and the project is primarily validated on Apple Silicon. It uses Apple system frameworks and has no third-party runtime dependencies.
+
+<pre><code>git clone https://github.com/tunianbututou/PerfDock.git
+cd PerfDock
+./build.sh
+open build/PerfDock.app</code></pre>
+
+The app is locally ad-hoc signed and is not notarized with an Apple Developer ID. The latest downloadable build is available from [GitHub Releases](https://github.com/tunianbututou/PerfDock/releases/latest). On first launch, macOS may require opening the downloaded app through Finder’s right-click menu.
+
+### Data and privacy
+
+Preferences and window state are stored in the local UserDefaults domain com.perfdock.app. Disk history is stored under ~/Library/Application Support/PerfDock/disk-history.json, and the optional login agent is under ~/Library/LaunchAgents/. Disk history can contain usage patterns; screenshots can contain quota values, process names, and system readings. Review such files before sharing them.
+
+PerfDock itself has no login, telemetry backend, or cloud service. It does not require administrator credentials, Accessibility permission, or Full Disk Access for its documented monitoring features.
+
+### License
+
+PerfDock is available under the [MIT License](LICENSE).

@@ -1,0 +1,1546 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>性能监视</title>
+<style>
+:root{
+  /* TDesign dark 语义 Token：容器 #242424 / 文本 90·55·35% / 品牌 #4582E6 */
+  --brand:#4582E6;
+  --success:#2BA471;
+  --warning:#CF6E2D;
+  --error:#C64751;
+  --gpu:#F2C94C;       /* GPU：黄色，与 CPU 蓝 / 内存绿 / 温度红 明显区分 */
+
+  /* 两个独立的可调维度：背景不透明度 / 文字不透明度 */
+  --bg-a:.42;      /* 背景：面板底色深浅，0 = 全透，1 = 近实底 */
+  --txt-a:1;       /* 文字：全部文字的不透明度倍率 */
+
+  /* 三级文字：数值、标签、次要信息。整体保持高亮白，靠字重而非亮度区分层级 */
+  --text-1:rgba(255,255,255,calc(1.00 * var(--txt-a)));   /* 数值 */
+  --text-2:rgba(255,255,255,calc(0.92 * var(--txt-a)));   /* 指标名 / 进程名 / 标题 */
+  --text-3:rgba(255,255,255,calc(0.70 * var(--txt-a)));   /* 单位 / 页脚 / 说明 */
+  --text-anti:#fff;
+
+  --track:rgba(255,255,255,.13);
+  --hairline:rgba(255,255,255,.09);
+  --hover:rgba(255,255,255,.08);
+
+  --r-sm:3px; --r-md:6px; --r-lg:9px; --r-xl:12px;
+  --drag-h:28px;
+  --scale:1;
+  --pad:14px;
+}
+
+*{box-sizing:border-box;margin:0;padding:0;-webkit-user-select:none;user-select:none}
+html,body{height:100%;background:transparent;overflow:hidden}
+body{
+  font-family:-apple-system,BlinkMacSystemFont,"SF Pro SC","PingFang SC","Helvetica Neue",sans-serif;
+  color:var(--text-1);
+  -webkit-font-smoothing:antialiased;
+  font-variant-numeric:tabular-nums;
+  font-feature-settings:"tnum" 1;
+}
+#root{
+  position:relative;height:100%;width:100%;
+  display:flex;flex-direction:column;
+  font-size:calc(12px * var(--scale));
+  padding:0 0 0 0;
+  overflow:hidden;
+  z-index:0;
+}
+/* 底色层：由「背景不透明度」控制。让面板在任意壁纸/窗口上都保持可读。 */
+#tint{position:absolute;inset:0;z-index:0;pointer-events:none;
+  background:linear-gradient(180deg,
+    rgba(15,16,20,calc(var(--bg-a) * .84)),
+    rgba(11,12,15,var(--bg-a)));}
+#drag,header,main,footer,#mini,#panel{position:relative;z-index:1}
+#mini,#panel{position:absolute}
+/* 顶部拖拽区：与系统标题栏高度对齐，内部不放可交互元素 */
+#drag{height:var(--drag-h);flex:0 0 auto;display:flex;align-items:center;gap:6px;padding:0 var(--pad);}
+#drag .branddot{width:5px;height:5px;border-radius:50%;background:var(--success);flex:0 0 auto;
+  box-shadow:0 0 0 2.5px rgba(43,164,113,.16);transition:background .4s,box-shadow .4s}
+#drag .branddot.warn{background:var(--warning);box-shadow:0 0 0 2.5px rgba(207,110,45,.18)}
+#drag .branddot.bad{background:var(--error);box-shadow:0 0 0 2.5px rgba(198,71,81,.20)}
+#drag .t{font-size:calc(11px * var(--scale));color:var(--text-2);letter-spacing:.04em}
+#drag .grip{margin-left:auto;display:flex;gap:2.5px;align-items:center;opacity:.5}
+#drag .grip i{width:2.5px;height:2.5px;border-radius:50%;background:var(--text-3)}
+
+/* 头部操作行 */
+header{flex:0 0 auto;display:flex;align-items:center;gap:8px;padding:0 var(--pad) 8px;height:30px}
+header .meta{display:flex;align-items:baseline;gap:7px;font-size:calc(10px * var(--scale));color:var(--text-3);min-width:0}
+header .meta b{font-weight:600;color:var(--text-2);font-size:calc(10px * var(--scale))}
+header .sp{flex:1}
+.icb{width:22px;height:22px;border-radius:var(--r-md);display:grid;place-items:center;
+  color:var(--text-2);background:transparent;border:none;cursor:pointer;transition:background .12s,color .12s}
+.icb:hover{background:var(--hover);color:var(--text-1)}
+.icb:active{transform:scale(.94)}
+.icb svg{width:13px;height:13px;display:block}
+.icb.off{opacity:.45}
+
+/* 内容区 */
+main{flex:1;min-height:0;overflow-y:auto;overflow-x:hidden;padding:0 var(--pad) 2px;scrollbar-width:none}
+main::-webkit-scrollbar{width:0;height:0}
+.sec{display:flex;flex-direction:column}
+.hr{height:1px;background:var(--hairline);margin:9px 0;flex:0 0 auto}
+
+/* 指标行 */
+.row{display:flex;align-items:center;gap:9px;height:29px;flex:0 0 auto}
+.row .lb{width:calc(42px * var(--scale));flex:0 0 auto;font-size:calc(11px * var(--scale));color:var(--text-2)}
+.barwrap{flex:1;min-width:0;position:relative;height:7px;border-radius:var(--r-sm);background:var(--track);overflow:hidden}
+.barwrap .fill{position:absolute;left:0;top:0;bottom:0;border-radius:var(--r-sm);
+  background:var(--brand);transition:width .34s cubic-bezier(.22,.8,.28,1),background .4s;min-width:0}
+.barwrap .spark{position:absolute;inset:0;width:100%;height:100%;opacity:.5;pointer-events:none}
+.val{width:calc(84px * var(--scale));flex:0 0 auto;text-align:right;font-size:calc(11.5px * var(--scale));
+  font-weight:600;color:var(--text-1);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.val i{font-style:normal;font-size:calc(9.5px * var(--scale));color:var(--text-3);font-weight:500;margin-left:1px}
+.val em{font-style:normal;font-size:calc(9.5px * var(--scale));color:var(--text-3);font-weight:500;margin-left:5px}
+
+/* 温度 chips */
+.temps{display:flex;gap:4px;flex:1;min-width:0;flex-wrap:wrap;align-items:center}
+.chip{display:inline-flex;align-items:center;gap:3px;padding:2px 6px;border-radius:var(--r-sm);
+  background:rgba(255,255,255,.09);font-size:calc(10px * var(--scale));color:var(--text-2);white-space:nowrap;
+  border:.5px solid rgba(255,255,255,.06);transition:background .2s,border-color .3s}
+.chip b{font-weight:600;color:var(--text-1)}
+.chip .k{font-size:calc(9px * var(--scale));color:var(--text-3)}
+.chip.warm{border-color:rgba(207,110,45,.35)}
+.chip.hot{border-color:rgba(198,71,81,.45)}
+.chip.hot b{color:#F2939B}
+.chip.warm b{color:#F0A874}
+
+/* 区块标题 */
+.sect{display:flex;align-items:center;gap:8px;height:24px;flex:0 0 auto}
+.sect .t{font-size:calc(10px * var(--scale));color:var(--text-3);letter-spacing:.06em}
+.seg{margin-left:auto;display:flex;background:var(--track);border-radius:var(--r-md);padding:1.5px;gap:1.5px}
+.seg button{border:none;background:transparent;color:var(--text-3);cursor:pointer;
+  font-size:calc(9.5px * var(--scale));padding:2.5px 8px;border-radius:4px;transition:background .15s,color .15s;
+  font-family:inherit}
+.seg button.on{background:rgba(255,255,255,.14);color:var(--text-1)}
+
+/* 进程排行 */
+.proc{display:flex;align-items:center;gap:8px;height:25px;flex:0 0 auto}
+.proc .rk{width:calc(11px * var(--scale));flex:0 0 auto;font-size:calc(9.5px * var(--scale));color:var(--text-3);text-align:center}
+.proc .nm{flex:1;min-width:0;display:flex;align-items:baseline;font-size:calc(11px * var(--scale));color:var(--text-2)}
+.proc .nm .nb{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.proc .nm .nt{flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  color:var(--text-3);margin-left:2px;font-size:calc(10px * var(--scale))}
+.proc .pb{width:calc(54px * var(--scale));flex:0 0 auto;height:5px;border-radius:2.5px;background:var(--track);position:relative;overflow:hidden}
+.proc .pb .f{position:absolute;left:0;top:0;bottom:0;border-radius:2.5px;background:var(--brand);
+  transition:width .34s cubic-bezier(.22,.8,.28,1)}
+.proc.p2 .pb .f{background:rgba(69,130,230,.72)}
+.proc.p3 .pb .f{background:rgba(69,130,230,.5)}
+.proc .pv{width:calc(50px * var(--scale));flex:0 0 auto;text-align:right;font-size:calc(10.5px * var(--scale));
+  font-weight:600;color:var(--text-1)}
+.proc .pv em{font-style:normal;font-weight:500;color:var(--text-3);font-size:calc(9.5px * var(--scale))}
+.proc.kernel .nm{color:var(--text-3)}
+.proc.kernel .pb .f{background:rgba(255,255,255,.22)}
+
+/* 页脚 */
+footer{flex:0 0 auto;display:flex;align-items:center;gap:6px;padding:7px var(--pad) 10px;
+  font-size:calc(9.5px * var(--scale));color:var(--text-3);min-height:0}
+footer .sepdot{opacity:.5}
+footer .nowrap{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+/* 电池行 */
+.bat{display:flex;align-items:center;gap:8px;height:26px;flex:0 0 auto;font-size:calc(10.5px * var(--scale));color:var(--text-2)}
+.bat .cell{position:relative;width:26px;height:12px;border-radius:3px;border:.8px solid var(--text-3);padding:1.5px;flex:0 0 auto}
+.bat .cell .lv{height:100%;border-radius:1.5px;background:var(--success);transition:width .3s}
+.bat .cell .lv.chg{background:var(--brand)}
+.bat .cell:after{content:"";position:absolute;right:-3px;top:3.5px;width:1.6px;height:5px;
+  border-radius:0 1px 1px 0;background:var(--text-3)}
+.bat .num{font-weight:600;color:var(--text-1)}
+
+/* 温度 chip 条：不设左侧标签，chip 自身已带 K 名 */
+.temps-row{align-items:center}
+.temps-row .temps{width:100%}
+
+/* 设置面板：整窗覆盖层，用完全不透明底色保证任何壁纸下都清晰 */
+#panel{position:absolute;inset:0;background:transparent;
+  display:flex;flex-direction:column;
+  transform:translateY(8px);opacity:0;pointer-events:none;transition:opacity .18s,transform .18s;
+  z-index:20;padding-top:var(--drag-h)}
+#root.settings-open > #drag,#root.settings-open > header,#root.settings-open > main,#root.settings-open > footer{visibility:hidden;pointer-events:none;transition:none}
+#panel.open{opacity:1;transform:none;pointer-events:auto}
+#panel .ph{display:flex;align-items:center;padding:0 var(--pad) 4px;height:28px;flex:0 0 auto}
+#panel .ph .t{font-size:calc(11.5px * var(--scale));color:var(--text-1);font-weight:600}
+#panel .pb{flex:1;min-height:0;overflow-y:auto;padding:0 var(--pad) 10px;scrollbar-width:none}
+#panel .pb::-webkit-scrollbar{width:0}
+.grp{margin-bottom:9px}
+.grp>.gl{font-size:calc(9.5px * var(--scale));color:var(--text-3);letter-spacing:.06em;margin-bottom:4px}
+.grp>.gl.withhint{display:flex;align-items:baseline;justify-content:space-between;gap:6px}
+.grp>.gl .ghint{font-size:calc(8.5px * var(--scale));color:var(--text-3);letter-spacing:0;
+  font-weight:400;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.grp>.gl.mt{margin-top:9px}
+.opt{display:flex;align-items:center;gap:8px;height:25px;font-size:calc(11px * var(--scale));color:var(--text-2)}
+.opt .sp{flex:1}
+.sw{width:28px;height:16px;border-radius:99px;background:var(--track);position:relative;cursor:pointer;
+  transition:background .18s;flex:0 0 auto;border:none}
+.sw:after{content:"";position:absolute;top:2px;left:2px;width:12px;height:12px;border-radius:50%;
+  background:#fff;opacity:.85;transition:transform .18s}
+.sw.on{background:var(--brand)}
+.sw.on:after{transform:translateX(12px);opacity:1}
+.segline{display:flex;background:var(--track);border-radius:var(--r-md);padding:1.5px;gap:1.5px}
+.segline button{flex:1;border:none;background:transparent;color:var(--text-3);cursor:pointer;font-family:inherit;
+  font-size:calc(10px * var(--scale));padding:3.5px 0;border-radius:4px;transition:background .15s,color .15s}
+.segline button.on{background:rgba(255,255,255,.14);color:var(--text-1)}
+.pbtn{width:100%;border:.5px solid var(--hairline);background:var(--hover);color:var(--text-2);
+  font-family:inherit;font-size:calc(10.5px * var(--scale));padding:7px 0;border-radius:var(--r-md);cursor:pointer;
+  transition:background .15s,color .15s}
+.pbtn:hover{background:rgba(255,255,255,.11);color:var(--text-1)}
+.pbtn.danger:hover{background:rgba(198,71,81,.18);color:#F2939B;border-color:rgba(198,71,81,.3)}
+.hint{font-size:calc(9.5px * var(--scale));color:var(--text-3);line-height:1.5;margin-top:5px}
+.hint.r{text-align:right;margin-top:2px}
+.empty{font-size:calc(10.5px * var(--scale));color:var(--text-3);padding:6px 0}
+
+/* 不透明度滑块 */
+.sld{display:flex;align-items:center;gap:8px;height:24px}
+.sld .n{width:calc(76px * var(--scale));flex:0 0 auto;font-size:calc(10.5px * var(--scale));color:var(--text-2)}
+.sld input[type=range]{-webkit-appearance:none;appearance:none;flex:1;min-width:0;height:14px;
+  background:transparent;cursor:pointer;margin:0}
+.sld input[type=range]::-webkit-slider-runnable-track{height:4px;border-radius:2px;background:var(--track)}
+.sld input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:11px;height:11px;border-radius:50%;
+  background:#fff;opacity:.92;margin-top:-3.5px;box-shadow:0 1px 3px rgba(0,0,0,.45)}
+.sld .v{width:calc(30px * var(--scale));flex:0 0 auto;text-align:right;
+  font-size:calc(10px * var(--scale));color:var(--text-3)}
+
+/* ── 侧边栏迷你形态 ──
+   关键：mini 与 full 两套内容用 opacity + visibility 做交叉淡入淡出，
+   而不是 display:none 硬切 —— 这样切换时旧内容先淡出、新内容淡入，
+   配合原生窗口尺寸动画，不会在透明 WebView 上露出浅色毛玻璃（白屏/卡顿感）。 */
+#mini{display:flex;position:absolute;inset:0;flex-direction:column;align-items:center;
+  gap:5px;padding:calc(var(--drag-h) * .5 + 4px) 0 7px;
+  opacity:0;visibility:hidden;pointer-events:none;
+  transition:opacity .22s ease,visibility .22s}
+body.mini #mini{opacity:1;visibility:visible;pointer-events:auto}
+/* full 态内容（拖拽条/头/主区/尾/设置层）：在 mini 态淡出并退出交互，但保留布局 */
+#drag,header,main,footer,#panel{transition:opacity .22s ease,visibility .22s}
+body.mini #drag,body.mini header,body.mini main,body.mini footer,body.mini #panel{opacity:0;visibility:hidden;pointer-events:none}
+body.mini #tint{background:linear-gradient(180deg,
+    rgba(15,16,20,calc(var(--bg-a) * .9)),
+    rgba(11,12,15,calc(var(--bg-a) * 1.05)))}
+/* 单个指标：文字 + 指示条（竖条时文字在上，横条时文字在左） */
+#mini .mg{flex:1;min-width:0;min-height:0;overflow:hidden;display:flex;flex-direction:column;
+  align-items:center;justify-content:flex-start;gap:2px}
+#mini .ml{font-size:var(--mini-fs,9px);line-height:1;color:var(--text-1);font-weight:600;
+  letter-spacing:.01em;white-space:nowrap;opacity:.95;max-width:100%}
+#mini .mb{width:6px;flex:1;min-height:8px;border-radius:3px;background:var(--track);position:relative;overflow:hidden}
+#mini .mb .f{position:absolute;bottom:0;left:0;right:0;border-radius:3px;background:var(--brand);
+  height:var(--v,0%);transition:height .34s cubic-bezier(.22,.8,.28,1),background .4s}
+#mini .mb.gpu .f{background:var(--gpu)}
+#mini .dot{width:6px;height:6px;border-radius:50%;background:var(--success);flex:0 0 auto;transition:background .4s;
+  box-shadow:0 0 0 2px rgba(43,164,113,.18)}
+#mini .dot.warm{background:var(--warning);box-shadow:0 0 0 2px rgba(207,110,45,.2)}
+#mini .dot.hot{background:var(--error);box-shadow:0 0 0 2px rgba(198,71,81,.22)}
+/* 拖动球：点击其余区域展开，拖动球本身用于调整在侧边的位置（事件由原生层处理） */
+#mini .ball{width:12px;height:12px;border-radius:50%;flex:0 0 auto;cursor:grab;position:relative;
+  background:var(--track);border:.5px solid var(--hairline)}
+#mini .ball:after{content:"";position:absolute;left:50%;top:50%;width:4px;height:4px;border-radius:50%;
+  transform:translate(-50%,-50%);background:var(--text-3)}
+/* 浅色主题下的迷你条底色：与浅色玻璃一致 */
+body.light.mini #tint{background:linear-gradient(180deg,
+    rgba(245,246,248,calc(var(--bg-a) * .94)),
+    rgba(233,236,240,calc(var(--bg-a) * 1.02)))}
+
+/* 横向收纳（贴上/下边）：一根细横带，文字在条左侧，条从左向右填充 */
+body.mini.h #mini{flex-direction:row;align-items:center;gap:6px;padding:0 6px 0 10px}
+body.mini.h #mini .mg{flex-direction:row;align-items:center;justify-content:flex-start;gap:3px}
+body.mini.h #mini .mb{width:auto;height:6px;min-width:12px;min-height:0;flex:1;border-radius:3px}
+body.mini.h #mini .mb .f{top:0;bottom:0;height:100%;width:var(--v,0%);right:auto;left:0;border-radius:3px;
+  transition:width .34s cubic-bezier(.22,.8,.28,1),background .4s}
+
+/* 自适应：窄 / 矮 */
+body.narrow header .meta .hz{display:none}
+body.narrow .proc .pb{display:none}
+body.narrow .row .lb{width:calc(36px * var(--scale))}
+body.narrow .val{width:calc(62px * var(--scale))}
+body.narrow .temps{gap:4px}
+body.tiny .val em{display:none}
+body.narrow #btn-size{display:none}
+
+/* ── 宽窗：指标与「占用 TOP」并排两栏，温度整行放到两块卡片下方 ── */
+.cols{display:flex;flex-direction:column}
+.col1,.col2,.tempro{min-width:0}
+/* 窄窗竖向顺序：指标 → 温度 → 占用 */
+.col1{order:1}
+.tempro{order:2}
+.col2{order:3}
+/* 宽窗：指标 | 占用 同一行；温度被挤到第二行、整宽横向排列 */
+body.wide .cols{flex-direction:row;flex-wrap:wrap;align-items:flex-start}
+body.wide .col1{order:1;flex:1 1 0;padding-right:14px}
+body.wide .col2{order:2;flex:1.2 1 0;padding-left:14px;border-left:1px solid var(--hairline)}
+body.wide .tempro{order:3;flex:1 1 100%;width:100%;margin-top:8px;padding-top:8px;
+  border-top:1px solid var(--hairline)}
+body.wide .tempro .temps{justify-content:flex-start}
+body.wide .col2 .hr{display:none}
+/* 每列变窄：压缩指标标签/数值、进程条/数值宽度，给条形与名字留出空间 */
+body.wide .row{gap:7px}
+body.wide .row .lb{width:calc(30px * var(--scale))}
+body.wide .val{width:calc(54px * var(--scale))}
+body.wide .proc .pb{width:calc(36px * var(--scale))}
+body.wide .proc .pv{width:calc(46px * var(--scale))}
+
+/* 预设弹层（右上角 ⤢） */
+#sizePop{position:absolute;top:calc(var(--drag-h));right:8px;width:178px;z-index:30;
+  background:#0f1014;border:1px solid var(--hairline);border-radius:var(--r-lg);
+  padding:8px;display:none;flex-direction:column;gap:5px;box-shadow:0 10px 28px rgba(0,0,0,.55)}
+#sizePop.open{display:flex}
+body.mini #sizePop{display:none !important}
+#sizePop .sp-h{font-size:calc(10px * var(--scale));color:var(--text-3);letter-spacing:.06em;margin-bottom:1px}
+#sizePop .srow{display:flex;align-items:center;gap:6px;height:26px;padding:0 7px;border-radius:var(--r-md);
+  background:var(--hover);cursor:pointer;color:var(--text-2);font-size:calc(10.5px * var(--scale));transition:background .12s,color .12s}
+#sizePop .srow:hover{background:rgba(255,255,255,.11);color:var(--text-1)}
+#sizePop .srow .nm{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#sizePop .srow .sz{color:var(--text-3);font-size:calc(9.5px * var(--scale))}
+#sizePop .pbtn.sm{padding:5px 0;font-size:calc(10px * var(--scale));margin-top:1px}
+
+/* 设置：预设编辑 */
+.prow{display:flex;align-items:center;gap:4px;height:28px}
+.prow .pin{background:var(--track);border:none;border-radius:var(--r-sm);color:var(--text-2);
+  font-family:inherit;font-size:calc(10px * var(--scale));height:18px;padding:0 4px;outline:none}
+.prow .pin.pw,.prow .pin.ph{width:42px;text-align:center}
+.prow .pin.pname{width:56px}
+.prow .pl{font-size:calc(9px * var(--scale));color:var(--text-3)}
+.prow .pdel{background:transparent;border:none;color:var(--text-3);cursor:pointer;
+  font-size:calc(10px * var(--scale));padding:0 4px;flex:0 0 auto}
+.prow .pdel:hover{color:#F2939B}
+
+/* 流量行（网络 / 磁盘）：一行内并排显示下行与上行（或读取与写入） */
+.flow{display:flex;gap:9px;flex:1;min-width:0;justify-content:flex-end;align-items:center}
+.flow .d{color:var(--text-1);font-weight:600;font-size:calc(11px * var(--scale));white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.flow .u{color:var(--text-3);font-size:calc(10.5px * var(--scale));white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.flow .sep{width:1px;height:11px;background:var(--hairline);flex:0 0 auto}
+/* 网络 / 磁盘独占一整栏，避免宽屏双栏左侧列溢出 */
+.flow-wrap{flex:0 0 auto;padding:0 var(--pad);margin-top:7px;padding-top:7px;border-top:1px solid var(--hairline)}
+.flow-wrap .row{height:24px;gap:8px}
+.flow-wrap .row .lb{width:calc(36px * var(--scale));color:var(--text-3);flex:0 0 auto}
+.flow-wrap .row .lb.wide{width:calc(52px * var(--scale))}
+.flow-wrap .flow{overflow:hidden}
+
+/* 趋势弹出层：覆盖内容区，绘制历史多线图 */
+#trend{position:absolute;top:var(--drag-h);left:0;right:0;bottom:0;z-index:30;background:#0b0c0f;
+  display:none;flex-direction:column;opacity:0;pointer-events:none}
+#trend.open{display:flex;opacity:1;pointer-events:auto}
+#trend .th{display:flex;align-items:center;padding:8px var(--pad);height:30px;flex:0 0 auto}
+#trend .th .t{font-size:calc(11.5px * var(--scale));color:var(--text-1);font-weight:600}
+#trend .th .sp{flex:1}
+#trend .legend{display:flex;flex-wrap:wrap;gap:10px;padding:2px var(--pad) 6px;flex:0 0 auto}
+#trend .legend .lg{display:flex;align-items:center;gap:4px;font-size:calc(9.5px * var(--scale));color:var(--text-3)}
+#trend .legend .lg i{width:9px;height:3px;border-radius:2px;display:inline-block}
+#trend .legend .lg b{font-weight:600;color:var(--text-2);font-style:normal}
+#trend canvas{flex:1;width:100%;min-height:0;display:block;padding:4px 8px 10px}
+/* 图表页签：实时趋势 / 磁盘读写 */
+#trend .tabs{display:flex;gap:4px;flex:0 0 auto}
+#trend .tab{height:19px;padding:0 9px;border-radius:6px;border:1px solid var(--hairline);
+  background:transparent;color:var(--text-3);font-size:calc(9.5px * var(--scale));cursor:pointer;
+  font-family:inherit}
+#trend .tab.on{background:var(--hover);color:var(--text-1);font-weight:600;border-color:transparent}
+#trend .view{flex:1;min-height:0;display:none;flex-direction:column}
+#trend .view.on{display:flex}
+/* 磁盘读写页 */
+#view-disk{overflow-y:auto;overflow-x:hidden}
+#disk-tiles{display:grid;grid-template-columns:1fr 1fr;gap:5px;padding:0 var(--pad) 6px;flex:0 0 auto}
+.dkt{background:rgba(255,255,255,.045);border:1px solid var(--hairline);border-radius:7px;
+  padding:4px 7px;min-width:0}
+body.light .dkt{background:rgba(24,26,32,.035)}
+.dkt .k{font-size:calc(8px * var(--scale));color:var(--text-3);white-space:nowrap;
+  overflow:hidden;text-overflow:ellipsis}
+.dkt .v{font-size:calc(12.5px * var(--scale));color:var(--text-1);font-weight:600;
+  line-height:1.25;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.dkt .v em{font-style:normal;font-size:calc(8px * var(--scale));color:var(--text-3);
+  font-weight:400;margin-left:1px}
+.dkt .s{font-size:calc(7.5px * var(--scale));color:var(--text-3);white-space:nowrap;
+  overflow:hidden;text-overflow:ellipsis}
+#disk-bar{display:flex;align-items:center;gap:8px;padding:0 var(--pad) 4px;flex:0 0 auto}
+#disk-bar .seg{display:flex;gap:3px;background:rgba(255,255,255,.05);border-radius:6px;padding:2px}
+body.light #disk-bar .seg{background:rgba(24,26,32,.05)}
+#disk-bar .seg button{height:17px;padding:0 8px;border:0;border-radius:4px;background:transparent;
+  color:var(--text-3);font-size:calc(9px * var(--scale));cursor:pointer;font-family:inherit}
+#disk-bar .seg button.on{background:rgba(255,255,255,.12);color:var(--text-1);font-weight:600}
+body.light #disk-bar .seg button.on{background:rgba(255,255,255,.9);color:var(--text-1)}
+#disk-bar .lg{display:flex;align-items:center;gap:3px;font-size:calc(8.5px * var(--scale));color:var(--text-3)}
+#disk-bar .lg i{width:8px;height:3px;border-radius:2px;display:inline-block}
+#disk-bar .lg.range{color:var(--text-2);font-weight:600;margin-left:2px}
+/* 画布给最小高度：窗口很矮时也保证图表可读，其余内容滚动 */
+#disk-canvas{flex:1 0 88px;width:100%;min-height:88px;display:block;padding:2px 8px 2px}
+#disk-note{padding:0 var(--pad) 5px;font-size:calc(7.5px * var(--scale));color:var(--text-3);
+  line-height:1.3;flex:0 0 auto}
+
+/* 主色色板 */
+.swatches{display:flex;gap:7px;padding:2px 0}
+.swatches .swc{width:20px;height:20px;border-radius:50%;cursor:pointer;position:relative;
+  border:2px solid transparent;transition:transform .12s}
+.swatches .swc:hover{transform:scale(1.08)}
+.swatches .swc.on{border-color:#fff;box-shadow:0 0 0 2px rgba(0,0,0,.35)}
+.swatches .swc.on:after{content:"";position:absolute;inset:0;display:grid;place-items:center;
+  color:#fff;font-size:11px;content:"✓"}
+
+/* ── 浅色主题：覆盖底色与文字语义色 ── */
+body.light #tint{background:linear-gradient(180deg,
+  rgba(245,246,248,calc(var(--bg-a) * .94)),
+  rgba(233,236,240,calc(var(--bg-a) * 1.02)))}
+body.light{
+  --text-1:rgba(24,26,32,calc(1.00 * var(--txt-a)));
+  --text-2:rgba(24,26,32,calc(.82 * var(--txt-a)));
+  --text-3:rgba(24,26,32,calc(.55 * var(--txt-a)));
+  --track:rgba(24,26,32,.12);
+  --hairline:rgba(24,26,32,.12);
+  --hover:rgba(24,26,32,.07);
+}
+body.light #panel{background:transparent;color:var(--text-1)}
+body.light #sizePop{background:#f5f6f8;border-color:var(--hairline)}
+body.light #trend{background:#f5f6f8}
+</style>
+</head>
+<body>
+<div id="root">
+  <div id="tint"></div>
+
+  <div id="drag">
+    <span class="branddot" id="dot"></span>
+    <span class="t">性能监视</span>
+    <span class="grip"><i></i><i></i><i></i></span>
+  </div>
+
+  <header>
+    <div class="meta">
+      <b id="m-sample">1s</b><span>采样</span>
+      <span class="sepdot">·</span>
+      <span class="hz"><span id="m-uptime">—</span> 已运行</span>
+    </div>
+    <div class="sp"></div>
+    <button class="icb" id="btn-size" title="窗口预设大小">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/>
+      </svg>
+    </button>
+    <button class="icb" id="btn-trend" title="历史趋势">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M3 17l6-6 4 4 7-7"/><path d="M14 8h6v6"/>
+      </svg>
+    </button>
+    <button class="icb" id="btn-theme" title="切换深色/浅色">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="12" cy="12" r="4.2"/><path d="M12 2.5v2.4M12 19.1v2.4M2.5 12h2.4M19.1 12h2.4M5.1 5.1l1.7 1.7M17.2 17.2l1.7 1.7M18.9 5.1l-1.7 1.7M6.8 17.2l-1.7 1.7"/>
+      </svg>
+    </button>
+    <button class="icb" id="btn-set" title="设置（更多）">
+      <svg viewBox="0 0 24 24" fill="currentColor">
+        <circle cx="5" cy="12" r="1.9"/><circle cx="12" cy="12" r="1.9"/><circle cx="19" cy="12" r="1.9"/>
+      </svg>
+    </button>
+    <button class="icb" id="btn-min" title="最小化到侧边栏">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+        <path d="M5 10l7 7 7-7"/>
+      </svg>
+    </button>
+    <button class="icb" id="btn-hide" title="隐藏悬浮窗（菜单栏可重新打开）">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+        <path d="M6 6l12 12M18 6L6 18"/>
+      </svg>
+    </button>
+  </header>
+
+  <main id="content"></main>
+  <footer id="foot"></footer>
+
+  <div id="mini">
+    <div class="mg"><span class="ml">CPU</span><div class="mb cpu"><div class="f" id="mb-cpu"></div></div></div>
+    <div class="mg"><span class="ml">GPU</span><div class="mb gpu"><div class="f" id="mb-gpu"></div></div></div>
+    <div class="mg"><span class="ml">内存</span><div class="mb mem"><div class="f" id="mb-mem"></div></div></div>
+    <div class="mg"><span class="ml">温</span><div class="mb temp"><div class="f" id="mb-temp"></div></div></div>
+    <div class="dot" id="mb-dot"></div>
+    <div class="ball" title="拖动调整位置"></div>
+  </div>
+
+  <div id="trend">
+    <div class="th">
+      <div class="tabs">
+        <button class="tab on" id="tab-live">实时趋势</button>
+        <button class="tab" id="tab-disk">磁盘读写</button>
+      </div>
+      <div class="sp"></div>
+      <button class="icb" id="btn-trend-close" title="关闭">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+          <path d="M6 6l12 12M18 6L6 18"/>
+        </svg>
+      </button>
+    </div>
+
+    <div class="view on" id="view-live">
+      <div class="legend" id="trend-legend"></div>
+      <canvas id="trend-canvas"></canvas>
+    </div>
+
+    <div class="view" id="view-disk">
+      <div id="disk-tiles">
+        <div class="dkt"><div class="k">今日写入</div><div class="v" id="dk-today-w">—</div><div class="s" id="dk-today-r">读取 —</div></div>
+        <div class="dkt"><div class="k">自安装累计写入</div><div class="v" id="dk-total-w">—</div><div class="s" id="dk-total-r">读取 —</div></div>
+        <div class="dkt"><div class="k">近 7 日日均写入</div><div class="v" id="dk-avg-w">—</div><div class="s" id="dk-year-w">年化 —</div></div>
+        <div class="dkt"><div class="k">已统计</div><div class="v" id="dk-hours">—</div><div class="s" id="dk-since">自 — 起</div></div>
+      </div>
+      <div id="disk-bar">
+        <div class="seg">
+          <button class="on" id="dk-day">按日</button>
+          <button id="dk-hour">按时</button>
+        </div>
+        <span class="lg range" id="dk-range">近 7 天</span>
+        <div style="flex:1"></div>
+        <span class="lg"><i style="background:var(--brand)"></i>读</span>
+        <span class="lg"><i style="background:var(--warning)"></i>写</span>
+      </div>
+      <canvas id="disk-canvas"></canvas>
+      <div id="disk-note">双指捏合缩放时间轴 · 仅统计运行期间的真实磁盘读写</div>
+    </div>
+  </div>
+
+  <div id="panel">
+    <div class="ph"><span class="t">设置</span>
+      <div class="sp" style="flex:1"></div>
+      <button class="icb" id="btn-pclose" title="关闭">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+          <path d="M6 6l12 12M18 6L6 18"/>
+        </svg>
+      </button>
+    </div>
+    <div class="pb" id="panel-body"></div>
+  </div>
+
+  <div id="sizePop">
+    <div class="sp-h">窗口预设</div>
+    <div id="sizeList"></div>
+    <button class="pbtn sm" id="btn-savecur">＋ 保存当前尺寸</button>
+  </div>
+</div>
+
+<script>
+"use strict";
+// ─────────────────────────────────────────────────────────────
+// 与原生壳的桥；没有原生桥时进入演示模式（便于单独预览与视觉校验）
+// ─────────────────────────────────────────────────────────────
+var native = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.dock;
+function send(cmd, extra){
+  if(!native) return;
+  var msg = Object.assign({cmd:cmd}, extra||{});
+  native.postMessage(msg);
+}
+
+var MODULES = [
+  {k:"cpu",    n:"CPU 负载"},
+  {k:"gpu",    n:"GPU 负载"},
+  {k:"mem",    n:"内存占用"},
+  {k:"temp",   n:"温度传感器"},
+  {k:"net",    n:"网络吞吐"},
+  {k:"disk",   n:"磁盘吞吐"},
+  {k:"procs",  n:"程序占用 Top3"},
+  {k:"battery",n:"电池"},
+  {k:"foot",   n:"页脚状态"}
+];
+var PREF = {
+  modules:{cpu:true,gpu:true,mem:true,temp:true,net:false,disk:false,procs:true,battery:true,foot:true},
+  interval:1000,
+  procMetric:"mem",
+  basis:"share",          // share = 占整机容量；single = 单核 100%
+  topN:3,
+  miniOrient:"v",         // 收纳形态：v = 竖条（贴左右），h = 横条（贴上下）
+  bgOpacity:0.42,         // 背景不透明度
+  textOpacity:1.0,        // 文字不透明度
+  blur:true,              // 原生毛玻璃模糊
+  alwaysOnTop:true,
+  hideOnWorkBuddyQuit:true,
+  launchAtLogin:true,
+  theme:"dark",           // dark / light / auto（auto 跟随系统，由原生下发有效外观）
+  brand:"#4582E6",        // 主色（驱动 --brand）
+  hotkeyEnabled:true,     // 全局快捷键 ⌥⇧P 显隐
+  presets:[
+    {name:"竖屏", w:282, h:348},
+    {name:"横屏", w:380, h:247}
+  ]
+};
+var LAST = null;
+var SYS_APPEARANCE = "dark";   // 原生下发的系统有效外观（dark/light）
+var trendTimes = [];            // 每个采样点的时间戳，用于趋势图时间轴
+var needsFit = true;            // 模块 / 主题 / 形态变化后需要重新适配窗口高度
+var SUN_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4.2"/><path d="M12 2.5v2.4M12 19.1v2.4M2.5 12h2.4M19.1 12h2.4M5.1 5.1l1.7 1.7M17.2 17.2l1.7 1.7M18.9 5.1l-1.7 1.7M6.8 17.2l-1.7 1.7"/></svg>';
+var MOON_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 14.5A8 8 0 1 1 9.5 4a6.2 6.2 0 0 0 10.5 10.5z"/></svg>';
+
+// 外观：背景透明度、文字透明度、主色、主题彼此独立
+function applyLook(){
+  var r = document.documentElement.style;
+  r.setProperty("--bg-a", PREF.bgOpacity.toFixed(3));
+  r.setProperty("--txt-a", PREF.textOpacity.toFixed(3));
+  r.setProperty("--brand", PREF.brand);
+}
+// 根据 theme + 系统外观解析出实际生效的主题，套用 body.light；并通知原生底座换色
+function applyTheme(){
+  var resolved = (PREF.theme === "auto") ? SYS_APPEARANCE : PREF.theme;
+  document.body.classList.toggle("light", resolved === "light");
+  if(native) send("theme", {mode: resolved});   // 原生深底/毛玻璃跟随主题
+}
+// 主题按钮图标：当前浅色显示太阳（点击→深色），当前深色显示月亮（点击→浅色）
+function setThemeGlyph(){
+  var b = document.getElementById("btn-theme");
+  if(!b) return;
+  var light = document.body.classList.contains("light");
+  b.innerHTML = light ? SUN_SVG : MOON_SVG;
+  b.title = light ? "切换到深色" : "切换到浅色";
+}
+
+// ── 工具 ──
+function esc(s){ return String(s).replace(/[&<>"]/g, function(c){
+  return ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;"})[c]; }); }
+function bytes(b){
+  if(b==null) return "—";
+  var g = b/1073741824;
+  if(g >= 10) return g.toFixed(1)+"G";
+  if(g >= 1)  return g.toFixed(2)+"G";
+  return Math.round(b/1048576)+"M";
+}
+// 吞吐速率：字节/秒 → 人类可读（B/s、K/s、M/s、G/s）
+function rate(bps){
+  if(bps==null || bps<=0) return "0";
+  var K=1024, M=K*1024, G=M*1024;
+  if(bps>=G) return (bps/G).toFixed(2)+"G/s";
+  if(bps>=M) return (bps/M).toFixed(1)+"M/s";
+  if(bps>=K) return (bps/K).toFixed(1)+"K/s";
+  return Math.round(bps)+"B/s";
+}
+// 温度 ℃ → 迷你条填充百分比（30°→0，100°→100）
+function tempToPct(t){ return Math.max(0, Math.min(100, (t-30)/70*100)); }
+// 温度 → 颜色：冷蓝、温橙、热红，与 chips 的热压力分级一致
+function tempColor(t){
+  if(t==null) return "var(--brand)";
+  if(t>=90) return "var(--error)";
+  if(t>=75) return "var(--warning)";
+  return "var(--brand)";
+}
+// 进程名常共享长前缀，差异恰好在尾部的括号里（WorkBuddy Helper (Renderer) / (GPU)）。
+// 所以把「基名」与「括号标签」拆开：基名可省略，标签永不截断，保证可区分。
+function splitName(n){
+  var m = /^(.*?)\s*\(([^)]*)\)\s*$/.exec(n);
+  if(m && m[2]) return { base: m[1], tag: "(" + m[2] + ")" };
+  return { base: n, tag: "" };
+}
+function nameHTML(n){
+  var s = splitName(n);
+  return '<span class="nb">' + esc(s.base) + '</span>' +
+         (s.tag ? '<span class="nt">' + esc(s.tag) + '</span>' : '');
+}
+function pct(v,d){ return (v==null?"—":v.toFixed(d==null?0:d)+"%"); }
+function levelColor(v, warn, bad){
+  return v>=bad ? "var(--error)" : v>=warn ? "var(--warning)" : null;
+}
+function heatClass(t, warn, hot){
+  return t==null ? "" : t>=hot ? "hot" : t>=warn ? "warm" : "";
+}
+// 迷你条：只写一个 --v 比值，填充方向由 CSS（body.mini.h）决定，避免内联轴与类不同步
+function setMiniBar(id, v){
+  var el = document.getElementById(id);
+  if(!el) return;
+  el.style.setProperty("--v", Math.max(2, Math.min(100, v||0)) + "%");
+}
+// 迷你形态字号自适应：按横截面（竖条看宽、横条看高）缩放，保证文字刚好放下
+function updateMiniFont(){
+  if(!document.body.classList.contains("mini")) return;
+  var cross = (PREF.miniOrient === "h") ? window.innerHeight : window.innerWidth;
+  var fs = Math.max(7.5, Math.min(11, cross * 0.34));
+  document.documentElement.style.setProperty("--mini-fs", fs.toFixed(1) + "px");
+}
+// 历史曲线：画进条形轨道里的细折线，不占额外空间
+function spark(hist, color){
+  if(!hist || hist.length<2) return "";
+  var w=100,h=7,mx=Math.max.apply(null,hist),mn=Math.min.apply(null,hist);
+  if(mx<=0) mx=1;
+  var span=Math.max(mx-mn, 6);
+  var pts=hist.map(function(v,i){
+    var x=i/(hist.length-1)*w;
+    var y=h-((v-mn)/span)*(h-1.5)-0.75;
+    return x.toFixed(2)+","+y.toFixed(2);
+  }).join(" ");
+  return '<svg class="spark" viewBox="0 0 '+w+' '+h+'" preserveAspectRatio="none">'+
+    '<polyline points="'+pts+'" fill="none" stroke="'+color+'" stroke-width="1" '+
+    'stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke"/></svg>';
+}
+function barRow(label, value, unit, fillPct, color, sub, hist){
+  return '<div class="row"><span class="lb">'+esc(label)+'</span>'+
+    '<span class="barwrap">'+spark(hist,color||"rgba(255,255,255,.5)")+
+      '<span class="fill" style="width:'+Math.max(0,Math.min(100,fillPct))+'%;background:'+(color||"var(--brand)")+'"></span>'+
+    '</span>'+
+    '<span class="val">'+value+'<i>'+unit+'</i>'+(sub?'<em>'+sub+'</em>':'')+'</span></div>';
+}
+
+// ── 渲染 ──
+function render(d){
+  LAST = d;
+  var prefs = PREF, mods = prefs.modules;
+  var c = d.cpu, g = d.gpu, m = d.mem;
+  var out = "";
+
+  // 状态点
+  var worst = Math.max(c.usage, m.percent, (g.util||0));
+  var dot = document.getElementById("dot");
+  dot.className = "branddot" + (worst>=90?" bad":worst>=75?" warn":"");
+
+  // 头部信息
+  document.getElementById("m-sample").textContent = (prefs.interval/1000)+"s";
+  document.getElementById("m-uptime").textContent =
+    d.uptime>3600 ? (d.uptime/3600).toFixed(1)+"h" : Math.round(d.uptime/60)+"m";
+
+  if(mods.cpu){
+    out += barRow("CPU", c.usage.toFixed(0), "%", c.usage,
+      levelColor(c.usage,80,92) || "var(--brand)", null, c.history);
+  }
+  if(mods.gpu){
+    var gu = g.util;
+    out += barRow("GPU", gu==null?"—":gu.toFixed(0), gu==null?"":"%", gu||0,
+      levelColor(gu||0,80,92) || "var(--gpu)", null, g.history);
+  }
+  if(mods.mem){
+    out += barRow("内存", m.percent.toFixed(0), "%", m.percent,
+      levelColor(m.percent,80,92) || "var(--brand)", bytes(m.used), m.history);
+  }
+  // 网络 / 磁盘吞吐：默认关闭；开启后放在 .cols 下方独占一行，避免宽屏双栏时左侧列溢出
+  var flowRows = "";
+  if(mods.net && d.net){
+    flowRows += '<div class="row"><span class="lb">网络</span>'+
+      '<span class="flow"><span class="d">↓'+rate(d.net.down)+'</span><span class="sep"></span>'+
+      '<span class="u">↑'+rate(d.net.up)+'</span></span></div>';
+  }
+  if(mods.disk && d.disk){
+    flowRows += '<div class="row"><span class="lb">磁盘</span>'+
+      '<span class="flow"><span class="d">读 '+rate(d.disk.read)+'</span><span class="sep"></span>'+
+      '<span class="u">写 '+rate(d.disk.write)+'</span></span></div>';
+    // 今日累计读写（真实块设备字节，独立 1s 记账，不受采样间隔影响）
+    if(d.diskToday){
+      flowRows += '<div class="row"><span class="lb wide">今日累计</span>'+
+        '<span class="flow"><span class="d">读 '+bytes(d.diskToday.r)+'</span><span class="sep"></span>'+
+        '<span class="u">写 '+bytes(d.diskToday.w)+'</span></span></div>';
+    }
+  }
+  if(mods.battery && d.battery && d.battery.available){
+    var b = d.battery;
+    var bs = b.charging ? "充电中"
+           : (b.minutesLeft>0 ? Math.floor(b.minutesLeft/60)+"h"+(b.minutesLeft%60)+"m" : "外接电源");
+    out += '<div class="row" title="'+esc(
+        "电量 "+b.percent+"%　"+(b.charging?"充电中":(b.onAC?"外接电源":"电池供电"))+
+        "　循环 "+b.cycles+" 次　最大容量为设计容量的 "+b.health.toFixed(0)+"%")+'">'+
+      '<span class="lb">电池</span>'+
+      '<span class="barwrap"><span class="fill" style="width:'+Math.max(2,b.percent)+'%;background:'+
+        (b.charging?"var(--success)":"var(--brand)")+'"></span></span>'+
+      '<span class="val">'+b.percent.toFixed(0)+'<i>%</i><em>'+bs+'</em></span></div>';
+  }
+  // 温度：单独一份；窄窗时排在指标之后，宽窗时被放到两块卡片下方的整行
+  var temps = "";
+  if(mods.temp){
+    var t = d.temp || {};
+    var chips = [];
+    function chip(k, v, warn, hot){
+      if(v==null) return;
+      chips.push('<span class="chip '+heatClass(v,warn,hot)+'"><span class="k">'+k+'</span><b>'+v.toFixed(0)+'°</b></span>');
+    }
+    chip("CPU", t.cpu, 75, 90);
+    chip("GPU", t.gpu, 75, 90);
+    chip("电池", t.battery, 40, 48);
+    // Ts* 系列无法证实其物理位置，统一按「其他」呈现，阈值取 SoC 同一档，避免误报为机身过热
+    chip("其他", t.skin, 75, 90);
+    if(chips.length){
+      var all = (t.sensors||[]).map(function(s){ return s.group+" "+s.key+" "+s.value+"°C"; }).join("　");
+      temps = '<div class="row temps-row" style="height:auto;padding:3px 0" title="'+esc(all)+'">'+
+        '<span class="temps">'+chips.join("")+'</span></div>';
+    } else {
+      temps = '<div class="row"><span class="lb">温度</span>'+
+        '<span class="temps"><span class="empty">传感器不可用</span></span></div>';
+    }
+  }
+
+  // 右列：占用 TOP（宽窗时与左列指标并排）
+  var pro = "";
+  if(mods.procs){
+    pro += '<div class="hr"></div>';
+    var metric = prefs.procMetric === "gpu" ? "gpu" : (prefs.procMetric === "mem" ? "mem" : "cpu");
+    var segOps = [["mem","内存"],["gpu","GPU"],["cpu","CPU"]];
+    pro += '<div class="sect" title="GPU 维度：按各进程提交的 GPU 时间比例，对设备利用率做归因（免授权读取 IOKit）">'+
+      '<span class="t">占用 TOP '+prefs.topN+'</span>'+
+      '<span class="seg">'+segOps.map(function(o){
+        return '<button data-pm="'+o[0]+'" class="'+(metric===o[0]?"on":"")+'">'+o[1]+'</button>';
+      }).join("")+'</span></div>';
+
+    var list = (d.procs||[]).slice();
+    var maxv = 1;
+    list.forEach(function(p){
+      var v = metric==="mem" ? p.mem : (metric==="gpu" ? (p.gpu||0) : p.cpuShare);
+      if(v>maxv) maxv=v;
+    });
+
+    pro += '<div class="procs">';
+    if(!list.length){
+      pro += '<div class="empty">无可见进程</div>';
+    } else {
+      list.forEach(function(p,i){
+        var v = metric==="mem" ? p.mem : (metric==="gpu" ? (p.gpu||0) : p.cpuShare);
+        var cls = "proc p"+(i+1);
+        var pv;
+        if(metric==="mem") pv = bytes(p.mem);
+        else if(metric==="gpu") pv = v.toFixed(1)+"<em>%</em>";
+        else pv = (prefs.basis==="single" ? p.cpuSingle.toFixed(1)+"<em>%单核</em>" : v.toFixed(1)+"<em>%</em>");
+        var tip = metric==="gpu"
+          ? esc(p.name)+'  ·  PID '+p.pid+'  ·  GPU '+v.toFixed(1)+'%  ·  单核 CPU '+(p.cpuSingle||0).toFixed(1)+'%  ·  常驻 '+bytes(p.mem)
+          : esc(p.name)+'  ·  PID '+p.pid+'  ·  常驻 '+bytes(p.mem)+'  ·  单核 '+(p.cpuSingle||0).toFixed(1)+'%';
+        pro += '<div class="'+cls+'" title="'+tip+'">'+
+          '<span class="rk">'+(i+1)+'</span>'+
+          '<span class="nm">'+nameHTML(p.name)+'</span>'+
+          '<span class="pb"><span class="f" style="width:'+Math.max(3,v/maxv*100)+'%"></span></span>'+
+          '<span class="pv">'+pv+'</span></div>';
+      });
+    }
+    // 内核进程对普通进程不可见，用残差推算，避免「总负载高但列表全 0」的困惑
+    if(metric==="cpu"){
+      var resid = Math.max(0, c.usage - (d.visibleCpuShare||0));
+      if(resid>8){
+        pro += '<div class="proc kernel" title="kernel_task 等系统内核进程无法被普通进程读取，此值由「总负载 − 可见进程合计」推算">'+
+          '<span class="rk">·</span><span class="nm">系统内核（推算）</span>'+
+          '<span class="pb"><span class="f" style="width:'+(resid/Math.max(c.usage,1)*100)+'%"></span></span>'+
+          '<span class="pv">'+resid.toFixed(1)+'<em>%</em></span></div>';
+      }
+    }
+    pro += '</div>';
+  }
+
+  // 窄窗：竖向叠放（指标 → 温度 → 占用）；宽窗：指标与占用左右并排，温度整行放两块下方
+  document.getElementById("content").innerHTML =
+    '<div class="cols"><div class="col1">'+out+'</div><div class="col2">'+pro+
+    '</div><div class="tempro">'+temps+'</div></div>'+
+    (flowRows ? '<div class="flow-wrap">'+flowRows+'</div>' : '');
+
+  // 页脚
+  var f = [];
+  if(mods.foot){
+    f.push("内核 "+(Math.max(0,c.usage-(d.visibleCpuShare||0))).toFixed(0)+"%");
+    f.push("热压力 " + ({"normal":"正常","fair":"偏高","serious":"严重","critical":"临界"}[d.thermal]||d.thermal));
+    f.push("交换 " + bytes(m.swapUsed));
+  }
+  f.push("进程 "+d.procCount);
+  document.getElementById("foot").innerHTML = f.map(function(x,i){
+    return (i?'<span class="sepdot">·</span>':'')+'<span class="nowrap">'+esc(x)+'</span>';
+  }).join("");
+
+  // 迷你形态：竖条按高度、横条按宽度填充，切换时清掉另一种，避免残留
+  setMiniBar("mb-cpu", c.usage);
+  setMiniBar("mb-gpu", g.util||0);
+  setMiniBar("mb-mem", m.percent);
+  var tcpu = (d.temp && d.temp.cpu!=null) ? d.temp.cpu : 0;
+  setMiniBar("mb-temp", tempToPct(tcpu));
+  var mt = document.getElementById("mb-temp");
+  if(mt) mt.style.background = tempColor(tcpu);
+  document.getElementById("mb-dot").className = "dot" + (worst>=90?" hot":worst>=75?" warm":"");
+  if(TREND_OPEN) drawTrend();   // 趋势层开启时随数据实时重绘
+  if(needsFit){ needsFit = false; requestFit(); }   // 模块/主题/形态变化后按内容适配高度
+}
+
+// ── 历史趋势弹出层 ──
+function cssVar(name){
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || "#888";
+}
+var TREND_OPEN = false;
+function toggleTrend(){
+  TREND_OPEN = !TREND_OPEN;
+  document.getElementById("trend").classList.toggle("open", TREND_OPEN);
+  if(TREND_OPEN){
+    if(TREND_TAB === "disk"){ send("diskHistory"); renderDisk(); startDiskTimer(); }
+    else drawTrend();
+  } else {
+    stopDiskTimer();
+  }
+}
+function buildTrendLegend(series){
+  var box = document.getElementById("trend-legend");
+  if(!box) return;
+  box.innerHTML = series.map(function(s){
+    return '<span class="lg"><i style="background:'+s.color+'"></i><b>'+s.name+'</b> '+
+      (s.val==null?"—":(s.name==="温度"?s.val.toFixed(0)+"°":s.val.toFixed(0)+"%"))+'</span>';
+  }).join("");
+}
+function drawTrend(){
+  if(!TREND_OPEN || !LAST) return;
+  var cv = document.getElementById("trend-canvas");
+  if(!cv) return;
+  var dpr = window.devicePixelRatio || 1;
+  var w = cv.clientWidth, h = cv.clientHeight;
+  if(w<=0 || h<=0) return;
+  if(cv.width !== Math.round(w*dpr) || cv.height !== Math.round(h*dpr)){
+    cv.width = Math.round(w*dpr); cv.height = Math.round(h*dpr);
+  }
+  var ctx = cv.getContext("2d");
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+  ctx.clearRect(0,0,w,h);
+
+  var padL=30, padR=8, padT=10, padB=16;
+  var plotW=w-padL-padR, plotH=h-padT-padB;
+  // 网格：0/25/50/75/100
+  ctx.font = "9px -apple-system,sans-serif";
+  ctx.textBaseline = "middle";
+  for(var g=0; g<=100; g+=25){
+    var y = padT + plotH*(1 - g/100);
+    ctx.strokeStyle = cssVar("--hairline");
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(w-padR, y); ctx.stroke();
+    ctx.fillStyle = cssVar("--text-3");
+    ctx.fillText(g+"%", 4, y);
+  }
+  var series = [
+    {name:"CPU", color:cssVar("--brand"),     data:(LAST.cpu?LAST.cpu.history:[]), val:(LAST.cpu?LAST.cpu.usage:null)},
+    {name:"GPU", color:cssVar("--gpu"),       data:(LAST.gpu?LAST.gpu.history:[]), val:(LAST.gpu&&LAST.gpu.util!=null?LAST.gpu.util:null)},
+    {name:"内存", color:cssVar("--success"),  data:(LAST.mem?LAST.mem.history:[]), val:(LAST.mem?LAST.mem.percent:null)},
+    {name:"温度", color:cssVar("--error"),    data:(LAST.tempHistory||[]),          val:(LAST.temp&&LAST.temp.cpu!=null?LAST.temp.cpu:null)}
+  ].filter(function(s){ return s.data && s.data.length>=2; });
+  buildTrendLegend(series);
+  series.forEach(function(s){
+    var n=s.data.length;
+    var xstep = n>1 ? plotW/(n-1) : plotW;
+    // 折线
+    ctx.strokeStyle = s.color; ctx.lineWidth = 1.6;
+    ctx.lineJoin = "round"; ctx.beginPath();
+    s.data.forEach(function(v,i){
+      var x = padL + i*xstep;
+      var y = padT + plotH*(1 - Math.max(0,Math.min(100,v))/100);
+      if(i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
+    });
+    ctx.stroke();
+    // 均值基线（虚线）
+    var mean = s.data.reduce(function(a,b){return a+b;},0)/n;
+    var ym = padT + plotH*(1 - Math.max(0,Math.min(100,mean))/100);
+    ctx.save(); ctx.setLineDash([3,3]); ctx.strokeStyle = s.color; ctx.globalAlpha = 0.45;
+    ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(padL,ym); ctx.lineTo(w-padR,ym); ctx.stroke();
+    ctx.restore();
+  });
+
+  // 时间轴（底部）：用采样时间戳画 ~5 个大致刻度，从左到右 = 越早 → 现在
+  var refLen = (LAST.cpu && LAST.cpu.history) ? LAST.cpu.history.length
+             : (LAST.tempHistory ? LAST.tempHistory.length : 0);
+  if(refLen >= 2){
+    var usedT = trendTimes.slice(-refLen);
+    var tNow = usedT.length >= 2 ? usedT[usedT.length-1] : Date.now();
+    var tStart = usedT.length >= 2 ? usedT[0] : (tNow - (refLen-1)*1000);
+    if(!(tStart < tNow)) tStart = tNow - (refLen-1)*1000;   // 兜底：缺时间戳则按 1s/点 估算
+    var span = Math.max(1, tNow - tStart);
+    ctx.font = "9px -apple-system,sans-serif";
+    ctx.fillStyle = cssVar("--text-3");
+    ctx.textBaseline = "alphabetic";
+    ctx.textAlign = "center";
+    var nt = 5;
+    for(var ti=0; ti<nt; ti++){
+      var x = padL + plotW * ti/(nt-1);
+      var lab = fmtRel(tNow - (tStart + span*ti/(nt-1)));
+      ctx.fillText(lab, x, h - 3);
+    }
+    ctx.textAlign = "left";
+  }
+}
+
+// ── 磁盘读写页（累计读/写，按日 / 按时，支持双指捏合缩放） ──
+var TREND_TAB = "live";      // live = 实时趋势，disk = 磁盘读写
+var DISK_MODE = "day";       // day = 按日聚合，hour = 按小时聚合
+var DISK = null;
+var DISK_HOURMAP = {};       // 小时起点秒 → [读, 写]
+var DISK_DAYMAP = {};        // 本地日期键 → [读, 写]
+var DISK_FITTED = false;     // 首次拿到数据时按已有范围自适应一次
+var diskTimer = null;
+
+// 时间窗：按日 3–120 天、按时 6–168 小时；跨度可被双指捏合连续改变
+var DISK_VIEW = {
+  day:  { span: 7 * 86400000, min: 3 * 86400000, max: 120 * 86400000 },
+  hour: { span: 24 * 3600000, min: 6 * 3600000,  max: 168 * 3600000  }
+};
+
+function setTrendTab(t){
+  TREND_TAB = t;
+  document.getElementById("tab-live").classList.toggle("on", t==="live");
+  document.getElementById("tab-disk").classList.toggle("on", t==="disk");
+  document.getElementById("view-live").classList.toggle("on", t==="live");
+  document.getElementById("view-disk").classList.toggle("on", t==="disk");
+  if(t === "disk"){
+    send("diskHistory");
+    attachDiskZoom();
+    renderDisk();
+    startDiskTimer();
+  } else {
+    stopDiskTimer();
+    drawTrend();
+  }
+}
+function startDiskTimer(){
+  stopDiskTimer();
+  diskTimer = setInterval(function(){ send("diskHistory"); }, 30000);
+}
+function stopDiskTimer(){ if(diskTimer){ clearInterval(diskTimer); diskTimer = null; } }
+function setDiskMode(m){
+  DISK_MODE = m;
+  document.getElementById("dk-day").classList.toggle("on", m==="day");
+  document.getElementById("dk-hour").classList.toggle("on", m==="hour");
+  updateDiskRange();
+  drawDisk();
+}
+function fmtIO(b){
+  if(b==null) return "—";
+  var T=1099511627776, G=1073741824, M=1048576, K=1024;
+  if(b>=T) return (b/T).toFixed(2)+"T";
+  if(b>=G) return (b/G).toFixed(1)+"G";
+  if(b>=M) return Math.round(b/M)+"M";
+  if(b>=K) return Math.round(b/K)+"K";
+  return b+"B";
+}
+function fmtAxisIO(b){
+  if(!b) return "0";
+  if(b>=1099511627776) return (b/1099511627776).toFixed(1)+"T";
+  if(b>=1073741824) return (b/1073741824).toFixed(0)+"G";
+  if(b>=1048576) return (b/1048576).toFixed(0)+"M";
+  return (b/1024).toFixed(0)+"K";
+}
+
+// ── 时间窗缩放 ──
+function diskSpan(){ return DISK_VIEW[DISK_MODE].span; }
+function diskRangeText(){
+  if(DISK_MODE === "day"){
+    return "近 " + Math.max(1, Math.round(diskSpan() / 86400000)) + " 天";
+  }
+  return "近 " + Math.max(1, Math.round(diskSpan() / 3600000)) + " 小时";
+}
+function updateDiskRange(){
+  var el = document.getElementById("dk-range");
+  if(el) el.textContent = diskRangeText();
+}
+function zoomDisk(factor){
+  if(!isFinite(factor) || factor <= 0) return;
+  var v = DISK_VIEW[DISK_MODE];
+  var s = Math.max(v.min, Math.min(v.max, v.span * factor));
+  if(Math.abs(s - v.span) < 1) return;
+  v.span = s;
+  updateDiskRange();
+  drawDisk();
+}
+function attachDiskZoom(){
+  var cv = document.getElementById("disk-canvas");
+  if(!cv || cv._pdZoom) return;
+  cv._pdZoom = true;
+  // 触控板捏合在 WebKit 里表现为 ctrl + wheel
+  cv.addEventListener("wheel", function(e){
+    if(!e.ctrlKey) return;
+    e.preventDefault();
+    zoomDisk(Math.exp(e.deltaY * 0.012));
+  }, { passive: false });
+  // Safari/WKWebView 的 GestureEvent（部分系统版本走这条）
+  var lastScale = 1;
+  cv.addEventListener("gesturestart", function(e){ e.preventDefault(); lastScale = 1; });
+  cv.addEventListener("gesturechange", function(e){
+    e.preventDefault();
+    if(!e.scale || e.scale <= 0) return;
+    zoomDisk(lastScale / e.scale);
+    lastScale = e.scale;
+  }, { passive: false });
+  // 双击复位到默认跨度（日 7 天 / 时 24 小时）
+  cv.addEventListener("dblclick", function(){
+    var v = DISK_VIEW[DISK_MODE];
+    v.span = (DISK_MODE === "day") ? 7*86400000 : 24*3600000;
+    updateDiskRange();
+    drawDisk();
+  });
+}
+
+// 原始小时序列 → 小时/日索引（缩放时本地聚合，不再请求原生）
+function indexDisk(){
+  DISK_HOURMAP = {}; DISK_DAYMAP = {};
+  var s = (DISK && DISK.series) ? DISK.series : [];
+  for(var i=0;i<s.length;i++){
+    var k = s[i][0], r = s[i][1] || 0, w = s[i][2] || 0;
+    DISK_HOURMAP[k] = [r, w];
+    var d = new Date(k * 1000);
+    var key = d.getFullYear() + "-" + (d.getMonth()+1) + "-" + d.getDate();
+    var b = DISK_DAYMAP[key] || [0, 0];
+    b[0] += r; b[1] += w;
+    DISK_DAYMAP[key] = b;
+  }
+}
+
+// 首次拿到数据：把日/时窗口收窄到「实际已有数据」附近（仍可捏合放大到上限）
+function fitDiskOnce(){
+  if(DISK_FITTED || !DISK || !DISK.since) return;
+  DISK_FITTED = true;
+  var secs = Math.max(0, Date.now() / 1000 - DISK.since);
+  var days = Math.ceil(secs / 86400) + 1;
+  DISK_VIEW.day.span = Math.max(DISK_VIEW.day.min,
+                                Math.min(30 * 86400000, days * 86400000));
+  var hrs = Math.ceil(secs / 3600) + 1;
+  DISK_VIEW.hour.span = Math.max(DISK_VIEW.hour.min,
+                                 Math.min(24 * 3600000, hrs * 3600000));
+  updateDiskRange();
+}
+
+// 按当前窗口聚合出柱状数据
+function diskBuckets(){
+  var span = diskSpan(), end = Date.now(), start = end - span;
+  var out = { labels: [], r: [], w: [] };
+  if(DISK_MODE === "day"){
+    var d = new Date(start); d.setHours(0,0,0,0);
+    while(d.getTime() < end){
+      var key = d.getFullYear() + "-" + (d.getMonth()+1) + "-" + d.getDate();
+      var b = DISK_DAYMAP[key] || [0, 0];
+      out.r.push(b[0]); out.w.push(b[1]);
+      out.labels.push((d.getMonth()+1) + "-" + (d.getDate() < 10 ? "0" : "") + d.getDate());
+      d.setDate(d.getDate() + 1);
+    }
+  } else {
+    var h = new Date(start); h.setMinutes(0,0,0);
+    while(h.getTime() < end){
+      var k = Math.floor(h.getTime() / 1000);
+      var b2 = DISK_HOURMAP[k] || [0, 0];
+      out.r.push(b2[0]); out.w.push(b2[1]);
+      var hh = h.getHours();
+      out.labels.push((hh < 10 ? "0" : "") + hh + "时");
+      h.setHours(h.getHours() + 1);
+    }
+  }
+  return out;
+}
+
+function renderDisk(){
+  if(!DISK) return;
+  indexDisk();
+  fitDiskOnce();
+  var t = DISK.today || {}, tot = DISK.total || {};
+  var g = function(id){ return document.getElementById(id); };
+  g("dk-today-w").textContent = fmtIO(t.w);
+  g("dk-today-r").textContent = "读取 " + fmtIO(t.r);
+  g("dk-total-w").textContent = fmtIO(tot.w);
+  g("dk-total-r").textContent = "读取 " + fmtIO(tot.r);
+  g("dk-avg-w").textContent = fmtIO(DISK.avg7Write);
+  g("dk-year-w").textContent = "年化 " + fmtIO(DISK.yearWrite);
+  g("dk-hours").textContent = (DISK.trackedHours || 0) + " 小时";
+  var d = new Date((DISK.since || 0) * 1000);
+  var mm = d.getMonth() + 1, dd = d.getDate();
+  g("dk-since").textContent = "自 " + mm + "-" + (dd < 10 ? "0" : "") + dd + " 起";
+  updateDiskRange();
+  drawDisk();
+}
+function drawDisk(){
+  if(TREND_TAB !== "disk" || !DISK) return;
+  var cv = document.getElementById("disk-canvas");
+  if(!cv) return;
+  var dpr = window.devicePixelRatio || 1;
+  var w = cv.clientWidth, h = cv.clientHeight;
+  if(w <= 0 || h <= 0) return;
+  if(cv.width !== Math.round(w*dpr) || cv.height !== Math.round(h*dpr)){
+    cv.width = Math.round(w*dpr); cv.height = Math.round(h*dpr);
+  }
+  var ctx = cv.getContext("2d");
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+  ctx.clearRect(0,0,w,h);
+
+  var src = diskBuckets();
+  var r = src.r, wr = src.w, labels = src.labels;
+  var n = Math.max(r.length, wr.length);
+  if(!n) return;
+
+  var padL = 34, padR = 7, padT = 8, padB = 14;
+  var plotW = w - padL - padR, plotH = h - padT - padB;
+  if(plotW <= 2 || plotH <= 2) return;
+
+  var maxV = 0;
+  for(var i=0;i<n;i++){ maxV = Math.max(maxV, r[i]||0, wr[i]||0); }
+  if(maxV <= 0) maxV = 1;
+  var top = maxV * 1.12;
+  var scale = plotH / top;
+
+  ctx.font = "8.5px -apple-system,sans-serif";
+  ctx.textBaseline = "middle";
+  for(var g=0; g<=2; g++){
+    var y = padT + plotH * (1 - g/2);
+    ctx.strokeStyle = cssVar("--hairline");
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(w-padR, y); ctx.stroke();
+    ctx.fillStyle = cssVar("--text-3");
+    ctx.fillText(fmtAxisIO(top * g/2), 2, y);
+  }
+
+  var slot = plotW / n;
+  var bw = Math.max(1.2, Math.min(6, slot * 0.3));
+  var cRead = cssVar("--brand"), cWrite = cssVar("--warning");
+  for(var i=0;i<n;i++){
+    var x = padL + slot * i + slot/2;
+    var hR = (r[i]||0) * scale, hW = (wr[i]||0) * scale;
+    if(hR > 0){
+      ctx.fillStyle = cRead;
+      ctx.fillRect(x - bw - 0.7, padT + plotH - hR, bw, Math.max(0.8, hR));
+    }
+    if(hW > 0){
+      ctx.fillStyle = cWrite;
+      ctx.fillRect(x + 0.7, padT + plotH - hW, bw, Math.max(0.8, hW));
+    }
+  }
+
+  ctx.fillStyle = cssVar("--text-3");
+  ctx.textAlign = "center";
+  ctx.textBaseline = "alphabetic";
+  var step = Math.max(1, Math.ceil(n / 6));
+  var lastDrawn = -10;
+  for(var j=0;j<n;j++){
+    var isLast = (j === n-1);
+    if(j % step === 0 || isLast){
+      if(isLast && j - lastDrawn < 2) continue;   // 末尾标签与上一刻度太近则不画，避免重叠
+      ctx.fillText(labels[j] || "", padL + slot*j + slot/2, h - 2);
+      lastDrawn = j;
+    }
+  }
+  ctx.textAlign = "left";
+}
+
+// 设置页复用底色层，隐藏其下的内容，避免透明背景下文字叠在一起。
+new MutationObserver(function(){
+  document.getElementById("root").classList.toggle("settings-open",
+    document.getElementById("panel").classList.contains("open"));
+}).observe(document.getElementById("panel"), {attributes:true, attributeFilter:["class"]});
+
+// ── 设置面板 ──
+function renderPanel(){
+  var m = PREF.modules;
+  var html = "";
+  html += '<div class="grp"><div class="gl withhint"><span>外观</span>'+
+    '<span class="ghint">背景与毛玻璃同步调节，文字独立</span></div>';
+  html += '<div class="sld"><span class="n">背景不透明度</span>'+
+    '<input type="range" min="8" max="100" value="'+Math.round(PREF.bgOpacity*100)+'" data-sl="bgOpacity">'+
+    '<span class="v" id="v-bgOpacity">'+Math.round(PREF.bgOpacity*100)+'%</span></div>';
+  html += '<div class="sld"><span class="n">文字不透明度</span>'+
+    '<input type="range" min="40" max="100" value="'+Math.round(PREF.textOpacity*100)+'" data-sl="textOpacity">'+
+    '<span class="v" id="v-textOpacity">'+Math.round(PREF.textOpacity*100)+'%</span></div>';
+  html += '<div class="opt"><span>毛玻璃模糊</span><span class="sp"></span>'+
+    '<button class="sw'+(PREF.blur?" on":"")+'" data-win="blur"></button></div>';
+  html += '<div class="grp" style="margin-top:9px"><div class="gl">主题</div><div class="segline">'+
+    [["dark","深色"],["light","浅色"],["auto","跟随系统"]].map(function(v){
+      return '<button data-th="'+v[0]+'" class="'+(PREF.theme===v[0]?"on":"")+'">'+v[1]+'</button>';
+    }).join("")+'</div></div>';
+  html += '<div class="grp"><div class="gl">主色</div><div class="swatches" id="brandSwatches">'+
+    ["#4582E6","#8E7BEF","#21C0A0","#2BA471","#F2994A","#EB5757","#E64BA0"].map(function(c){
+      return '<span class="swc'+(PREF.brand.toLowerCase()===c.toLowerCase()?" on":"")+'" data-brand="'+c+'" '+
+        'style="background:'+c+'"></span>';
+    }).join("")+'</div>'+
+    '<div class="hint">主色用于进度条与强调元素；浅色主题适配亮壁纸。</div></div>';
+  html += '<div class="hint">背景与文字可分别调节：想更透就降背景，想更清楚就提文字。</div></div>';
+
+  html += '<div class="grp"><div class="gl">展示项（可增删）</div>';
+  MODULES.forEach(function(x){
+    html += '<div class="opt"><span>'+x.n+'</span><span class="sp"></span>'+
+      '<button class="sw'+(m[x.k]?" on":"")+'" data-mod="'+x.k+'"></button></div>';
+  });
+  html += '</div>';
+
+  html += '<div class="grp"><div class="gl">采样间隔</div><div class="segline">'+
+    [1000,3000,5000,10000,30000].map(function(v){
+      return '<button data-iv="'+v+'" class="'+(PREF.interval===v?"on":"")+'">'+(v/1000)+'s</button>';
+    }).join("")+'</div>'+
+    '<div class="hint">间隔越长开销越低；切换维度后首个采样周期数值会从 0 开始累计。</div></div>';
+
+  html += '<div class="grp"><div class="gl">进程排行维度</div><div class="segline">'+
+    [["mem","内存"],["gpu","GPU"],["cpu","CPU"]].map(function(v){
+      return '<button data-pmd="'+v[0]+'" class="'+(PREF.procMetric===v[0]?"on":"")+'">'+v[1]+'</button>';
+    }).join("")+'</div>'+
+    '<div class="hint">GPU 维度按各进程提交的 GPU 时间比例，对设备利用率做归因（IOKit，免授权）。</div></div>';
+
+  html += '<div class="grp"><div class="gl">占百分比口径</div><div class="segline">'+
+    [["share","占整机容量"],["single","单核 100%"]].map(function(v){
+      return '<button data-bs="'+v[0]+'" class="'+(PREF.basis===v[0]?"on":"")+'">'+v[1]+'</button>';
+    }).join("")+'</div>'+
+    '<div class="hint">占整机容量 = 该程序 / 全部核心，总和不超过 100%；单核 100% 与「活动监视器」口径一致，单线程程序可接近 100%。</div></div>';
+
+  html += '<div class="grp"><div class="gl">窗口行为</div>';
+  html += '<div class="opt"><span>始终置顶</span><span class="sp"></span><button class="sw'+(PREF.alwaysOnTop?" on":"")+'" data-win="alwaysOnTop"></button></div>';
+  html += '<div class="opt"><span>WorkBuddy 退出时隐藏</span><span class="sp"></span><button class="sw'+(PREF.hideOnWorkBuddyQuit?" on":"")+'" data-win="hideOnWorkBuddyQuit"></button></div>';
+  html += '<div class="opt"><span>登录时自动启动</span><span class="sp"></span><button class="sw'+(PREF.launchAtLogin?" on":"")+'" data-win="launchAtLogin"></button></div>';
+  html += '</div>';
+
+  html += '<div class="grp"><div class="gl">窗口预设大小</div>'+
+    '<div id="presetEdit"></div>'+
+    '<button class="pbtn" id="btn-addpreset" style="margin-top:5px">＋ 保存当前窗口尺寸为新预设</button>'+
+    '<div class="hint">预设可在右上角 ⤢ 一键套用；修改即时生效。</div></div>';
+
+  html += '<div class="grp"><button class="pbtn" id="btn-reset">恢复默认设置</button></div>';
+  html += '<div class="grp"><button class="pbtn danger" id="btn-quit">退出 PerfDock</button></div>';
+  html += '<div class="hint">数据全部来自本机原生接口（Mach / IOKit / libproc），不联网、不上传。</div>';
+  document.getElementById("panel-body").innerHTML = html;
+  renderPresetEdit();
+  renderSizePop();
+}
+
+// ── 窗口预设：右上角弹层 + 设置内编辑 ──
+function renderSizePop(){
+  var list = document.getElementById("sizeList");
+  if(!list) return;
+  list.innerHTML = (PREF.presets||[]).map(function(p,i){
+    return '<div class="srow" data-sz="'+i+'"><span class="nm">'+esc(p.name)+'</span>'+
+      '<span class="sz">'+p.w+'×'+p.h+'</span></div>';
+  }).join("");
+}
+function toggleSizePop(){ var e=document.getElementById("sizePop"); if(e) e.classList.toggle("open"); }
+function applyPresetFromList(idx){
+  var p=(PREF.presets||[])[idx];
+  if(!p) return;
+  send("preset",{w:p.w,h:p.h});
+  var e=document.getElementById("sizePop"); if(e) e.classList.remove("open");
+}
+function commitPresets(){ send("pref",{key:"presets",value:PREF.presets}); }
+function addCurrentPreset(){
+  var w=Math.round(window.innerWidth), h=Math.round(window.innerHeight);
+  if(!PREF.presets) PREF.presets=[];
+  PREF.presets=PREF.presets.slice();
+  PREF.presets.push({name:"预设 "+(PREF.presets.length+1), w:w, h:h});
+  commitPresets(); renderPresetEdit(); renderSizePop();
+}
+function deletePreset(i){
+  if(!PREF.presets) return;
+  PREF.presets=PREF.presets.slice();
+  PREF.presets.splice(i,1);
+  commitPresets(); renderPresetEdit(); renderSizePop();
+}
+function renderPresetEdit(){
+  var box=document.getElementById("presetEdit");
+  if(!box) return;
+  var ps=PREF.presets||[];
+  if(!ps.length){ box.innerHTML='<div class="empty">暂无预设</div>'; return; }
+  box.innerHTML=ps.map(function(p,i){
+    return '<div class="prow">'+
+      '<input class="pin pname" data-i="'+i+'" value="'+esc(p.name)+'" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">'+
+      '<span class="pl">宽</span><input class="pin pw" data-i="'+i+'" type="number" min="190" max="1400" value="'+p.w+'" autocomplete="off">'+
+      '<span class="pl">高</span><input class="pin ph" data-i="'+i+'" type="number" min="170" max="1400" value="'+p.h+'" autocomplete="off">'+
+      '<button class="pdel" data-i="'+i+'" title="删除">✕</button></div>';
+  }).join("");
+}
+
+// 滑块：拖动时实时预览并写入偏好
+document.addEventListener("input", function(e){
+  var el = e.target;
+  if(el && el.dataset && el.dataset.sl){
+    var k = el.dataset.sl;
+    PREF[k] = parseInt(el.value,10)/100;
+    applyLook();
+    var lab = document.getElementById("v-"+k);
+    if(lab) lab.textContent = el.value+"%";
+    send("pref",{key:k,value:PREF[k]});
+  } else if(el && el.classList && el.classList.contains("pname")){
+    var pi=parseInt(el.dataset.i,10);
+    if(PREF.presets && PREF.presets[pi]){ PREF.presets[pi].name=el.value; commitPresets(); renderSizePop(); }
+  } else if(el && el.classList && (el.classList.contains("pw")||el.classList.contains("ph"))){
+    var pj=parseInt(el.dataset.i,10);
+    if(PREF.presets && PREF.presets[pj]){
+      var v2=parseInt(el.value,10)||0;
+      PREF.presets[pj][el.classList.contains("pw")?"w":"h"]=v2;
+      commitPresets(); renderSizePop();
+    }
+  }
+});
+
+document.addEventListener("click", function(e){
+  var el = e.target.closest ? e.target.closest("[data-mod],[data-iv],[data-pmd],[data-bs],[data-win],[data-pm]") : null;
+  if(el){
+    if(el.dataset.mod){
+      PREF.modules[el.dataset.mod] = !PREF.modules[el.dataset.mod];
+      send("pref",{key:"modules",value:PREF.modules}); renderPanel(); if(LAST) render(LAST); requestFit();
+    } else if(el.dataset.iv){
+      PREF.interval = parseInt(el.dataset.iv,10);
+      send("pref",{key:"interval",value:PREF.interval}); renderPanel(); if(LAST) render(LAST);
+    } else if(el.dataset.pmd){
+      PREF.procMetric = el.dataset.pmd;
+      send("pref",{key:"procMetric",value:PREF.procMetric}); renderPanel(); if(LAST) render(LAST);
+    } else if(el.dataset.bs){
+      PREF.basis = el.dataset.bs;
+      send("pref",{key:"basis",value:PREF.basis}); renderPanel(); if(LAST) render(LAST);
+    } else if(el.dataset.win){
+      var k = el.dataset.win;
+      PREF[k] = !PREF[k];
+      send("pref",{key:k,value:PREF[k]}); renderPanel();
+    } else if(el.dataset.pm){
+      PREF.procMetric = el.dataset.pm;
+      send("pref",{key:"procMetric",value:PREF.procMetric}); if(LAST) render(LAST);
+    }
+    return;
+  }
+  if(e.target.closest("[data-th]")){
+    PREF.theme = e.target.closest("[data-th]").dataset.th;
+    send("pref",{key:"theme",value:PREF.theme}); applyTheme(); setThemeGlyph(); requestFit();
+    renderPanel(); if(LAST) render(LAST);
+    return;
+  }
+  if(e.target.closest("[data-brand]")){
+    PREF.brand = e.target.closest("[data-brand]").dataset.brand;
+    send("pref",{key:"brand",value:PREF.brand}); applyLook(); renderPanel(); if(LAST) render(LAST);
+    return;
+  }
+  if(e.target.closest("#btn-size"))  { document.getElementById("sizePop").classList.toggle("open"); return; }
+  if(e.target.closest("#btn-savecur")){ addCurrentPreset(); return; }
+  if(e.target.closest("#btn-addpreset")){ addCurrentPreset(); return; }
+  if(e.target.closest(".pdel"))      { var di=parseInt(e.target.closest(".pdel").dataset.i,10); deletePreset(di); return; }
+  if(e.target.closest(".srow"))      { var si=parseInt(e.target.closest(".srow").dataset.sz,10); applyPresetFromList(si); return; }
+  if(e.target.closest("#btn-theme")) {
+    var lightT = document.body.classList.contains("light");
+    PREF.theme = lightT ? "dark" : "light";   // 直接切换深色/浅色，覆盖「跟随系统」
+    send("pref",{key:"theme",value:PREF.theme});
+    applyTheme(); setThemeGlyph(); renderPanel(); if(LAST) render(LAST);
+    return;
+  }
+  if(e.target.closest("#btn-set"))   { document.getElementById("panel").classList.add("open"); return; }
+  if(e.target.closest("#btn-pclose")){ document.getElementById("panel").classList.remove("open"); if(document.activeElement && document.activeElement.blur) document.activeElement.blur(); return; }
+  if(e.target.closest("#btn-trend")) { toggleTrend(); return; }
+  if(e.target.closest("#btn-trend-close")){ toggleTrend(); return; }
+  if(e.target.closest("#tab-live")) { setTrendTab("live"); return; }
+  if(e.target.closest("#tab-disk")) { setTrendTab("disk"); return; }
+  if(e.target.closest("#dk-day"))   { setDiskMode("day"); return; }
+  if(e.target.closest("#dk-hour"))  { setDiskMode("hour"); return; }
+  if(e.target.closest("#btn-min"))   { send("minimize"); return; }
+  if(e.target.closest("#btn-hide"))  { send("hide"); return; }
+  if(e.target.closest("#btn-reset")) { send("resetPrefs"); return; }
+  if(e.target.closest("#btn-quit"))  { send("quit"); return; }
+  // 点击弹层外部时收起预设弹层
+  var sp = document.getElementById("sizePop");
+  if(sp && sp.classList.contains("open") && !e.target.closest("#sizePop") && !e.target.closest("#btn-size")){
+    sp.classList.remove("open");
+  }
+});
+
+// ── 窗口高度自动适配：按内容自然高度请求原生重设高度（防裁切，且不过度挤压手动缩放）──
+function naturalContentHeight(){
+  var content = document.getElementById("content");
+  if(!content) return 0;
+  // 临时解除 flex 约束量取真实内容高度：窗口过高时 scrollHeight 会等于 client 而非内容
+  var prevFlex = content.style.flex, prevH = content.style.height, prevO = content.style.overflow;
+  content.style.flex = "none"; content.style.height = "auto"; content.style.overflow = "visible";
+  var h = content.scrollHeight;
+  content.style.flex = prevFlex; content.style.height = prevH; content.style.overflow = prevO;
+  return h;
+}
+function requestFit(){
+  if(!native) return;
+  if(document.body.classList.contains("mini")) return;   // 迷你态由原生控制尺寸
+  var h = naturalContentHeight();
+  if(h <= 0) return;
+  var dragH = parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--drag-h")) || 28;
+  var headerH = 30, footerEl = document.getElementById("foot"), footerH = footerEl ? footerEl.offsetHeight : 28;
+  var total = Math.round(dragH + headerH + h + footerH + 6);   // 期望的内容区高度
+  var diff = total - window.innerHeight;
+  // 偏小时（裁切风险）→ 增高；明显空余 → 收缩；小幅差异不动，避免与手动缩放打架
+  if(diff > 2 || diff < -8){ send("fit", {h: total}); }
+}
+// 时间轴相对标签：距现在的秒/分/时
+function fmtRel(ms){
+  if(!(ms >= 0)) ms = 0;
+  var s = Math.round(ms/1000);
+  if(s < 60) return s <= 0 ? "现在" : "-"+s+"s";
+  var m = Math.floor(s/60), rs = s%60;
+  if(m < 60) return "-"+m+"m"+(rs?rs+"s":"");
+  var hh = Math.floor(m/60); return "-"+hh+"h"+(m%60)+"m";
+}
+
+// ── 自适应：随窗口尺寸调整密度与字号 ──
+var ro = new ResizeObserver(function(){
+  var w = window.innerWidth, h = window.innerHeight;
+  var b = document.body;
+  var wide = (w >= 380 || (w >= 340 && h < 300));
+  if(wide !== b.classList.contains("wide")){ requestFit(); }   // 跨横/竖形态时重适配高度
+  b.classList.toggle("narrow", w < 236);
+  b.classList.toggle("tiny", w < 208 || h < 320);
+  b.classList.toggle("wide", wide);
+  var s = Math.max(.9, Math.min(1.08, w/268));
+  document.documentElement.style.setProperty("--scale", s.toFixed(3));
+  updateMiniFont();
+});
+ro.observe(document.body);
+
+// ── 原生壳接口 ──
+window.pd = {
+  init: function(payload){
+    if(payload && payload.prefs) PREF = Object.assign(PREF, payload.prefs);
+    if(payload && payload.appearance) SYS_APPEARANCE = payload.appearance;
+    if(payload && payload.topInset) document.documentElement.style.setProperty("--drag-h", payload.topInset+"px");
+    applyLook();
+    applyTheme();
+    setThemeGlyph();
+    renderPanel();
+    needsFit = true;   // 首屏按内容适配高度
+  },
+  appearance: function(a){
+    SYS_APPEARANCE = a;
+    applyTheme();
+    setThemeGlyph();
+    if(LAST) render(LAST);
+  },
+  topInset: function(px){
+    document.documentElement.style.setProperty("--drag-h", Math.max(20,px)+"px");
+  },
+  data: function(d){
+    if(!document.body.classList.contains("mini")){
+      trendTimes.push(Date.now());
+      if(trendTimes.length > 64) trendTimes.shift();
+    }
+    render(d);
+  },
+  diskHistory: function(d){
+    DISK = d;
+    if(TREND_TAB === "disk") renderDisk();
+  },
+  // 原生双指捏合转发（WKWebView 不把 magnification 传给 DOM）
+  zoomDisk: function(f){
+    if(TREND_TAB === "disk") zoomDisk(f);
+  },
+  mode: function(m, orient){
+    if(orient) PREF.miniOrient = orient;
+    document.body.classList.toggle("mini", m==="mini");
+    document.body.classList.toggle("h", m==="mini" && PREF.miniOrient === "h");
+    document.getElementById("panel").classList.remove("open");
+    updateMiniFont();
+    if(m !== "mini") requestFit();   // 从收纳展开后按内容重新适配高度
+  }
+};
+
+// 窗口尺寸变化时重绘当前图表页（画布按 CSS 尺寸重算）
+window.addEventListener("resize", function(){
+  if(!TREND_OPEN) return;
+  if(TREND_TAB === "disk") drawDisk(); else drawTrend();
+});
+
+// ── 演示模式：脱离原生壳也能看到完整界面（用于视觉校验）──
+if(!native){
+  document.documentElement.style.setProperty("--drag-h","28px");
+  applyLook();
+  renderPanel();  var demo = {t:0};
+  (function tick(){
+    demo.t += 1;
+    var h = function(base,amp,phase,off){
+      var a=[]; for(var i=0;i<48;i++){
+        a.push(Math.max(0, base + amp*Math.sin((i+phase)/4.2) + (i%5)*1.3 + off));
+      } return a;
+    };
+    var cpu = 26 + 14*Math.sin(demo.t/3.6) + 6*Math.sin(demo.t/1.3);
+    var gpu = 41 + 21*Math.sin(demo.t/2.4+1.1);
+    var mem = 71.8 + 1.4*Math.sin(demo.t/6);
+    render({
+      cpu:{usage:cpu, user:cpu*.68, system:cpu*.32, cores:[], history:h(26,13,demo.t,0)},
+      gpu:{util:gpu, name:"Apple M4", history:h(41,18,demo.t,0)},
+      mem:{total:16*1073741824, used:12330000000, active:3400000000, wired:2500000000,
+           compressed:5700000000, free:1000000000, reclaimable:3600000000,
+           swapTotal:4294967296, swapUsed:2940000000, percent:mem, history:h(71,1.6,demo.t,0)},
+      battery:{available:true, percent:78, charging:false, onAC:false, cycles:54, minutesLeft:217, health:97.6},
+      procs:[
+        {pid:20384, name:"WorkBuddy Helper (Renderer)", cpuShare:2.78, cpuSingle:27.8, mem:1040000000},
+        {pid:18722, name:"BambuStudio", cpuShare:2.44, cpuSingle:24.4, mem:118000000},
+        {pid:9512,  name:"WeChat", cpuShare:1.29, cpuSingle:12.9, mem:344000000}
+      ],
+      procMetric:"mem", procCount:315, visibleCpuShare:13.2,
+      temp:{cpu:66.5, gpu:58.1, battery:36.6, skin:53.7, sensors:[]},
+      thermal:"normal", load:[4.64,9.93,11.11], uptime:3980, cores:10
+    });
+    setTimeout(tick, 1000);
+  })();
+} else {
+  // 页面就绪后主动向原生层要一次偏好与初始状态。
+  // 不能依赖原生层"加载完成后推一次"：时序上可能早于页面脚本就绪而被静默丢掉。
+  send("ready");
+}
+</script>
+</body>
+</html>

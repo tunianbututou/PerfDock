@@ -1,0 +1,16 @@
+.DS_Store
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.log
+*.dSYM/
+*.xcuserstate
+DerivedData/
+build/
+work/
+Backups/
+*.app/
+*.zip
+*.dmg
